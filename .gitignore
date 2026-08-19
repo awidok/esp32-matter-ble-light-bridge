@@ -1,0 +1,16 @@
+build/
+*/managed_components/
+managed_components/*
+!managed_components/qb4-dev__esp-lampsmart-ble/
+managed_components/qb4-dev__esp-lampsmart-ble/*
+!managed_components/qb4-dev__esp-lampsmart-ble/CMakeLists.txt
+!managed_components/qb4-dev__esp-lampsmart-ble/idf_component.yml
+!managed_components/qb4-dev__esp-lampsmart-ble/include/
+!managed_components/qb4-dev__esp-lampsmart-ble/include/lampsmart_ble.h
+!managed_components/qb4-dev__esp-lampsmart-ble/src/
+!managed_components/qb4-dev__esp-lampsmart-ble/src/lampsmart_ble.c
+sdkconfig
+sdkconfig.old
+.cache/
+.tooling/
+.DS_Store

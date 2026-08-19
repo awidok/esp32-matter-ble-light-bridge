@@ -1,0 +1,20 @@
+dependencies:
+  idf:
+    source:
+      type: idf
+    version: 5.5.4
+  qb4-dev/esp-lampsmart-ble:
+    component_hash: 15c209f6f94c41337cff5f7c4b22f42b53b9851a3968107c65b3f83651196cf4
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.3
+direct_dependencies:
+- qb4-dev/esp-lampsmart-ble
+manifest_hash: 0e51b557f140e1fc9842ff8b1e3668d28ba8dc578bfefb0b86e611aa5acd36d8
+target: esp32s3
+version: 2.0.0

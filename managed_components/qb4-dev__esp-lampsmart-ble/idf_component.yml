@@ -1,0 +1,15 @@
+dependencies:
+  idf: '>=5.0'
+description: Component for ESP-IDF to control BLE lights
+documentation: https://github.com/QB4-dev/esp-lampsmart-ble/blob/master/README.md
+issues: https://github.com/QB4-dev/esp-lampsmart-ble/issues
+license: MIT
+repository: git://github.com/QB4-dev/esp-lampsmart-ble.git
+repository_info:
+  commit_sha: b4c3f6cada616bc764605fe5c2ee475e61655d8d
+  path: .
+tags:
+- ble
+- iot
+url: https://github.com/QB4-dev/esp-lampsmart-ble
+version: 1.0.3

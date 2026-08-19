@@ -1,0 +1,19 @@
+menu "LampSmart bridge"
+
+    config LAMPSMART_CONTROLLER_ID
+        hex "LampSmart controller ID"
+        range 0x0001 0xFFFF
+        default 0x5018
+        help
+            Controller/group ID captured from the existing LampSmart remote.
+            For the v1 protocol, the subgroup nibble is configured separately.
+
+    config LAMPSMART_GROUP_INDEX
+        int "LampSmart subgroup index"
+        range 0 15
+        default 1
+        help
+            Four-bit subgroup/index captured by the sniffer. The transmitted
+            v1 wire group is built from this value and LAMPSMART_CONTROLLER_ID.
+
+endmenu

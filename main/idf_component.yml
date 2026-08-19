@@ -1,0 +1,2 @@
+dependencies:
+  qb4-dev/esp-lampsmart-ble: "^1.0.3"

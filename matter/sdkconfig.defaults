@@ -1,0 +1,18 @@
+# ESP32-S3 board used by this project.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Native USB Serial/JTAG is the console connection used on the Mac.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+
+# Matter uses NimBLE for commissioning. Keep NimBLE alive afterwards because
+# the same radio broadcasts the proprietary LampSmart commands.
+CONFIG_USE_BLE_ONLY_FOR_COMMISSIONING=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+
+# The example OTA requestor consumes RAM and is not needed for this local bridge.
+CONFIG_ENABLE_OTA_REQUESTOR=n
+
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
