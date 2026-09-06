@@ -126,6 +126,19 @@ to the ESP32. A command from the original remote therefore does not update the
 Matter device card. The next Alice command or bridge restart reapplies the saved
 Matter state.
 
+Explicit On/Off and color-target commands are retransmitted even when the
+corresponding Matter state is unchanged. This lets a repeated command correct
+the physical light after a missed packet or a change made with its remote.
+The bridge does not periodically overwrite remote changes while idle.
+
+## Regression checks
+
+Run `sh tests/run.sh` with a C++17 compiler on macOS or Linux. These host tests
+exercise the production bridge worker with simulated Matter attributes, task
+notifications, and BLE transmission failures. They cover repeated commands,
+color-mode switches, and restoration; they do not test the radio, Wi-Fi, or
+Alice voice recognition. Build the firmware with `./idf.sh -C matter build`.
+
 ## License
 
 Original project code is distributed under the [MIT License](LICENSE).

@@ -84,6 +84,43 @@ Check the `Matter -> LampSmart` and `TX command` log lines:
 
 ## State does not match after a restart
 
+### Off works only after saying On first
+
+The BLE protocol has no acknowledgement. Matter's cached state can differ from
+the physical light after a missed transmission, a wall-switch power cycle, or a
+command from the original remote. The Matter SDK normally ignores an On/Off
+command if its OnOff attribute already has that value.
+
+The bridge now explicitly retransmits repeated On and Off commands, including
+when the SDK does not write an attribute. Look for
+`Repeat Matter off command despite cached state`, followed by `TX command=0x11`.
+If no incoming Matter command appears at all, investigate the controller and
+network instead; state replay cannot repair a command that never reaches ESP32.
+
+### White does nothing but daylight works
+
+In the [Yandex color palette](https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/color_setting),
+white is 4500 K (approximately 222 mireds) and daylight is 5600 K (approximately
+178 mireds). Both are supported. Older firmware inferred the active mode from
+the last color-coordinate write and ignored a change of ColorMode alone.
+
+The bridge now uses Matter ColorMode and caches every mode's coordinates. It
+also retransmits explicit color targets that already match Matter's state while
+Matter considers the light on. This covers repeating a saved white temperature
+after changing the physical light with its remote. Check for a `CWW` transmission
+and the expected mired value. Switching white temperature should not change the
+requested total brightness.
+
+### Brightness drops to about 50% after On or a restart
+
+Older firmware set both OnLevel and StartUpCurrentLevel to 128. New firmware
+uses the previous level. On the first upgraded boot, the old persisted startup
+default of 128 is migrated to null (restore the previous level); other stored
+startup values are preserved. Later user changes to StartUpCurrentLevel are also
+preserved. Wi-Fi credentials and Matter fabrics are not reset by this migration.
+
+### Changes made with the original remote
+
 The Matter state and Wi-Fi credentials are stored in NVS and reapplied at
 startup. However, the original remote transmits commands directly to the light,
 and the ESP32 does not listen for them while operating as a bridge. Changes made

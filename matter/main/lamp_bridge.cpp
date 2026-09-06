@@ -40,6 +40,7 @@ portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 LampState s_state;
 LampState s_applied;
 bool s_applied_valid;
+bool s_force_apply;
 
 template <typename T> T clamp_value(T value, T minimum, T maximum)
 {
@@ -129,7 +130,7 @@ bool equal_state(const LampState &left, const LampState &right)
            left.saturation == right.saturation;
 }
 
-esp_err_t apply_state(const LampState &state)
+esp_err_t apply_state(const LampState &state, bool force_power)
 {
     if (!state.power) {
         ESP_LOGI(kTag, "Matter -> LampSmart: off");
@@ -137,7 +138,7 @@ esp_err_t apply_state(const LampState &state)
     }
 
     esp_err_t err = ESP_OK;
-    if (!s_applied_valid || !s_applied.power) {
+    if (force_power || !s_applied_valid || !s_applied.power) {
         err = lampsmart::set_power(true);
         if (err != ESP_OK) {
             return err;
@@ -181,19 +182,26 @@ void bridge_task(void *)
         }
 
         LampState requested;
+        bool force_apply;
         taskENTER_CRITICAL(&s_state_lock);
         requested = s_state;
+        force_apply = s_force_apply;
+        s_force_apply = false;
         taskEXIT_CRITICAL(&s_state_lock);
 
-        if (s_applied_valid && equal_state(requested, s_applied)) {
+        if (!force_apply && s_applied_valid && equal_state(requested, s_applied)) {
             continue;
         }
 
-        const esp_err_t err = apply_state(requested);
+        const esp_err_t err = apply_state(requested, force_apply);
         if (err == ESP_OK) {
             s_applied = requested;
             s_applied_valid = true;
         } else {
+            // Preserve an explicit repeat across a busy advertiser or TX error.
+            taskENTER_CRITICAL(&s_state_lock);
+            s_force_apply = s_force_apply || force_apply;
+            taskEXIT_CRITICAL(&s_state_lock);
             ESP_LOGW(kTag, "LampSmart update failed: %s; retrying", esp_err_to_name(err));
             vTaskDelay(pdMS_TO_TICKS(500));
             xTaskNotifyGive(s_task);
@@ -208,8 +216,52 @@ void schedule_apply()
     }
 }
 
-esp_err_t read_attribute(uint16_t endpoint_id, uint32_t cluster_id,
-                         uint32_t attribute_id)
+bool update_state(LampState &state, uint32_t cluster_id, uint32_t attribute_id,
+                  const esp_matter_attr_val_t &value)
+{
+    if (value.is_null()) {
+        return false;
+    }
+    if (cluster_id == OnOff::Id && attribute_id == OnOff::Attributes::OnOff::Id) {
+        state.power = value.val.b;
+    } else if (cluster_id == LevelControl::Id &&
+               attribute_id == LevelControl::Attributes::CurrentLevel::Id) {
+        state.level = clamp_value<uint8_t>(value.val.u8, 0, 254);
+    } else if (cluster_id == ColorControl::Id) {
+        // Matter can update cached coordinates for inactive color modes. Only
+        // ColorMode selects the output; attribute arrival order must not do so.
+        if (attribute_id == ColorControl::Attributes::ColorMode::Id) {
+            const auto mode = static_cast<ColorControl::ColorMode>(value.val.u8);
+            if (mode == ColorControl::ColorMode::kColorTemperature) {
+                state.mode = ColorMode::kTemperature;
+            } else if (mode == ColorControl::ColorMode::kCurrentXAndCurrentY) {
+                state.mode = ColorMode::kXy;
+            } else if (mode == ColorControl::ColorMode::kCurrentHueAndCurrentSaturation) {
+                state.mode = ColorMode::kHueSaturation;
+            } else {
+                return false;
+            }
+        } else if (attribute_id == ColorControl::Attributes::ColorTemperatureMireds::Id) {
+            state.mireds = value.val.u16;
+        } else if (attribute_id == ColorControl::Attributes::CurrentX::Id) {
+            state.x = value.val.u16;
+        } else if (attribute_id == ColorControl::Attributes::CurrentY::Id) {
+            state.y = value.val.u16;
+        } else if (attribute_id == ColorControl::Attributes::CurrentHue::Id) {
+            state.hue = value.val.u8;
+        } else if (attribute_id == ColorControl::Attributes::CurrentSaturation::Id) {
+            state.saturation = value.val.u8;
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    return true;
+}
+
+esp_err_t read_attribute(LampState &state, uint16_t endpoint_id,
+                         uint32_t cluster_id, uint32_t attribute_id)
 {
     attribute_t *attr = attribute::get(endpoint_id, cluster_id, attribute_id);
     if (attr == nullptr) {
@@ -220,7 +272,8 @@ esp_err_t read_attribute(uint16_t endpoint_id, uint32_t cluster_id,
     if (err != ESP_OK) {
         return err;
     }
-    return lamp_bridge_attribute_update(endpoint_id, cluster_id, attribute_id, &value);
+    update_state(state, cluster_id, attribute_id, value);
+    return ESP_OK;
 }
 
 } // namespace
@@ -242,38 +295,8 @@ esp_err_t lamp_bridge_attribute_update(uint16_t endpoint_id, uint32_t cluster_id
         return ESP_OK;
     }
 
-    bool changed = false;
     taskENTER_CRITICAL(&s_state_lock);
-    if (cluster_id == OnOff::Id && attribute_id == OnOff::Attributes::OnOff::Id) {
-        s_state.power = value->val.b;
-        changed = true;
-    } else if (cluster_id == LevelControl::Id &&
-               attribute_id == LevelControl::Attributes::CurrentLevel::Id) {
-        s_state.level = value->val.u8;
-        changed = true;
-    } else if (cluster_id == ColorControl::Id) {
-        if (attribute_id == ColorControl::Attributes::ColorTemperatureMireds::Id) {
-            s_state.mireds = value->val.u16;
-            s_state.mode = ColorMode::kTemperature;
-            changed = true;
-        } else if (attribute_id == ColorControl::Attributes::CurrentX::Id) {
-            s_state.x = value->val.u16;
-            s_state.mode = ColorMode::kXy;
-            changed = true;
-        } else if (attribute_id == ColorControl::Attributes::CurrentY::Id) {
-            s_state.y = value->val.u16;
-            s_state.mode = ColorMode::kXy;
-            changed = true;
-        } else if (attribute_id == ColorControl::Attributes::CurrentHue::Id) {
-            s_state.hue = value->val.u8;
-            s_state.mode = ColorMode::kHueSaturation;
-            changed = true;
-        } else if (attribute_id == ColorControl::Attributes::CurrentSaturation::Id) {
-            s_state.saturation = value->val.u8;
-            s_state.mode = ColorMode::kHueSaturation;
-            changed = true;
-        }
-    }
+    const bool changed = update_state(s_state, cluster_id, attribute_id, *value);
     taskEXIT_CRITICAL(&s_state_lock);
 
     if (changed) {
@@ -282,11 +305,71 @@ esp_err_t lamp_bridge_attribute_update(uint16_t endpoint_id, uint32_t cluster_id
     return ESP_OK;
 }
 
+void lamp_bridge_repeat_power_command(uint16_t endpoint_id, bool on)
+{
+    if (endpoint_id != s_endpoint_id) {
+        return;
+    }
+    taskENTER_CRITICAL(&s_state_lock);
+    // The SDK does not write OnOff when it already equals the requested value.
+    // A one-way lamp may still differ, so an explicit On/Off must be broadcast.
+    const bool repeat = s_state.power == on;
+    if (repeat) {
+        s_force_apply = true;
+    }
+    taskEXIT_CRITICAL(&s_state_lock);
+    if (repeat) {
+        ESP_LOGI(kTag, "Repeat Matter %s command despite cached state", on ? "on" : "off");
+        schedule_apply();
+    }
+}
+
+void lamp_bridge_repeat_color_command(uint16_t endpoint_id, uint32_t command_id,
+                                      uint16_t first, uint16_t second)
+{
+    if (endpoint_id != s_endpoint_id) {
+        return;
+    }
+    using namespace ColorControl::Commands;
+    bool matches = false;
+    taskENTER_CRITICAL(&s_state_lock);
+    if (command_id == MoveToColorTemperature::Id) {
+        matches = s_state.mode == ColorMode::kTemperature && s_state.mireds == first;
+    } else if (command_id == MoveToColor::Id) {
+        matches = s_state.mode == ColorMode::kXy && s_state.x == first && s_state.y == second;
+    } else if (s_state.mode == ColorMode::kHueSaturation) {
+        if (command_id == MoveToHue::Id) {
+            matches = s_state.hue == first;
+        } else if (command_id == MoveToSaturation::Id) {
+            matches = s_state.saturation == first;
+        } else if (command_id == MoveToHueAndSaturation::Id) {
+            matches = s_state.hue == first && s_state.saturation == second;
+        }
+    }
+    const bool repeat = s_state.power && matches;
+    if (repeat) {
+        s_force_apply = true;
+    }
+    taskEXIT_CRITICAL(&s_state_lock);
+    if (repeat) {
+        ESP_LOGI(kTag, "Repeat Matter color command despite cached state");
+        schedule_apply();
+    }
+}
+
 esp_err_t lamp_bridge_sync_from_matter(uint16_t endpoint_id)
 {
+    if (endpoint_id != s_endpoint_id) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    LampState restored;
+    taskENTER_CRITICAL(&s_state_lock);
+    restored = s_state;
+    taskEXIT_CRITICAL(&s_state_lock);
+
     esp_err_t result = ESP_OK;
     auto read = [&](uint32_t cluster, uint32_t attribute_id) {
-        const esp_err_t err = read_attribute(endpoint_id, cluster, attribute_id);
+        const esp_err_t err = read_attribute(restored, endpoint_id, cluster, attribute_id);
         if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
             result = err;
         }
@@ -294,23 +377,23 @@ esp_err_t lamp_bridge_sync_from_matter(uint16_t endpoint_id)
 
     read(LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id);
 
-    attribute_t *mode_attr = attribute::get(endpoint_id, ColorControl::Id,
-                                             ColorControl::Attributes::ColorMode::Id);
-    esp_matter_attr_val_t mode_value;
-    if (mode_attr != nullptr && attribute::get_val(mode_attr, &mode_value) == ESP_OK) {
-        const auto mode = static_cast<ColorControl::ColorMode>(mode_value.val.u8);
-        if (mode == ColorControl::ColorMode::kColorTemperature) {
-            read(ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id);
-        } else if (mode == ColorControl::ColorMode::kCurrentXAndCurrentY) {
-            read(ColorControl::Id, ColorControl::Attributes::CurrentX::Id);
-            read(ColorControl::Id, ColorControl::Attributes::CurrentY::Id);
-        } else if (mode == ColorControl::ColorMode::kCurrentHueAndCurrentSaturation) {
-            read(ColorControl::Id, ColorControl::Attributes::CurrentHue::Id);
-            read(ColorControl::Id, ColorControl::Attributes::CurrentSaturation::Id);
-        }
-    }
-
-    // Power is intentionally last, so the debounce applies a complete state.
+    // Cache all modes: a later command can change only ColorMode while leaving
+    // that mode's previously stored coordinates/temperature unchanged.
+    read(ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id);
+    read(ColorControl::Id, ColorControl::Attributes::CurrentX::Id);
+    read(ColorControl::Id, ColorControl::Attributes::CurrentY::Id);
+    read(ColorControl::Id, ColorControl::Attributes::CurrentHue::Id);
+    read(ColorControl::Id, ColorControl::Attributes::CurrentSaturation::Id);
+    read(ColorControl::Id, ColorControl::Attributes::ColorMode::Id);
     read(OnOff::Id, OnOff::Attributes::OnOff::Id);
+
+    if (result == ESP_OK) {
+        // Publish a complete snapshot atomically, including the selected mode.
+        taskENTER_CRITICAL(&s_state_lock);
+        s_state = restored;
+        s_force_apply = true;
+        taskEXIT_CRITICAL(&s_state_lock);
+        schedule_apply();
+    }
     return result;
 }

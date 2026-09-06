@@ -6,6 +6,7 @@
 
 #include "app/server/CommissioningWindowManager.h"
 #include "app/server/Server.h"
+#include "app/data-model/Decode.h"
 #include "platform/ConfigurationManager.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -13,6 +14,7 @@
 #include "esp_matter.h"
 #include "esp_matter_console.h"
 #include "lamp_bridge.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 #include "common_macros.h"
@@ -80,10 +82,121 @@ esp_err_t attribute_update_cb(attribute::callback_type_t type, uint16_t endpoint
                               uint32_t cluster_id, uint32_t attribute_id,
                               esp_matter_attr_val_t *value, void *)
 {
-    if (type != attribute::PRE_UPDATE) {
+    if (type != attribute::POST_UPDATE) {
         return ESP_OK;
     }
     return lamp_bridge_attribute_update(endpoint_id, cluster_id, attribute_id, value);
+}
+
+template <typename CommandData, bool On>
+esp_err_t power_command_cb(const ConcreteCommandPath &path, TLVReader &reader, void *)
+{
+    CommandData data;
+    // This user callback receives a copy of the TLV reader. Leave validation,
+    // attribute changes, transitions, and the response to the standard handler.
+    if (chip::app::DataModel::Decode(reader, data) == CHIP_NO_ERROR) {
+        lamp_bridge_repeat_power_command(path.mEndpointId, On);
+    }
+    return ESP_OK;
+}
+
+template <uint32_t CommandId, typename CommandData>
+esp_err_t color_command_cb(const ConcreteCommandPath &path, TLVReader &reader, void *)
+{
+    CommandData data;
+    if (chip::app::DataModel::Decode(reader, data) != CHIP_NO_ERROR ||
+        data.transitionTime == UINT16_MAX) {
+        return ESP_OK;
+    }
+    using namespace ColorControl::Commands;
+    uint16_t first = 0;
+    uint16_t second = 0;
+    if constexpr (CommandId == MoveToColorTemperature::Id) {
+        first = data.colorTemperatureMireds;
+    } else if constexpr (CommandId == MoveToColor::Id) {
+        first = data.colorX;
+        second = data.colorY;
+    } else if constexpr (CommandId == MoveToHue::Id) {
+        if (data.direction == ColorControl::DirectionEnum::kUnknownEnumValue) {
+            return ESP_OK;
+        }
+        first = data.hue;
+    } else if constexpr (CommandId == MoveToSaturation::Id) {
+        first = data.saturation;
+    } else if constexpr (CommandId == MoveToHueAndSaturation::Id) {
+        first = data.hue;
+        second = data.saturation;
+    }
+    lamp_bridge_repeat_color_command(path.mEndpointId, path.mCommandId, first, second);
+    return ESP_OK;
+}
+
+template <uint32_t CommandId, typename CommandData>
+esp_err_t register_color_command_callback()
+{
+    command_t *cmd = command::get(s_light_endpoint_id, ColorControl::Id, CommandId);
+    if (cmd == nullptr) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    command::set_user_callback(cmd, color_command_cb<CommandId, CommandData>);
+    return ESP_OK;
+}
+
+esp_err_t register_command_callbacks()
+{
+    command_t *on = command::get(s_light_endpoint_id, OnOff::Id, OnOff::Commands::On::Id);
+    command_t *off = command::get(s_light_endpoint_id, OnOff::Id, OnOff::Commands::Off::Id);
+    if (on == nullptr || off == nullptr) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    command::set_user_callback(on, power_command_cb<OnOff::Commands::On::DecodableType, true>);
+    command::set_user_callback(off, power_command_cb<OnOff::Commands::Off::DecodableType, false>);
+    using namespace ColorControl::Commands;
+    ESP_ERROR_CHECK((register_color_command_callback<MoveToColorTemperature::Id, MoveToColorTemperature::DecodableType>()));
+    ESP_ERROR_CHECK((register_color_command_callback<MoveToColor::Id, MoveToColor::DecodableType>()));
+    ESP_ERROR_CHECK((register_color_command_callback<MoveToHue::Id, MoveToHue::DecodableType>()));
+    ESP_ERROR_CHECK((register_color_command_callback<MoveToSaturation::Id, MoveToSaturation::DecodableType>()));
+    ESP_ERROR_CHECK((register_color_command_callback<MoveToHueAndSaturation::Id, MoveToHueAndSaturation::DecodableType>()));
+    return ESP_OK;
+}
+
+esp_err_t migrate_startup_level()
+{
+    // StartUpCurrentLevel is persisted: changing only the config default would
+    // leave upgraded boards at the old forced 50% brightness. Migrate once,
+    // before the cluster startup callback, preserving non-default user values.
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("lamp_bridge", NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t revision = 0;
+    err = nvs_get_u8(handle, "level_cfg_v", &revision);
+    if ((err == ESP_OK && revision >= 1) ||
+        (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)) {
+        nvs_close(handle);
+        return err;
+    }
+
+    attribute_t *attr = attribute::get(s_light_endpoint_id, LevelControl::Id,
+                                      LevelControl::Attributes::StartUpCurrentLevel::Id);
+    esp_matter_attr_val_t value;
+    err = attr == nullptr ? ESP_ERR_NOT_FOUND : attribute::get_val(attr, &value);
+    if (err == ESP_OK && !value.is_null() && value.val.u8 == 128) {
+        value = esp_matter_nullable_uint8(nullable<uint8_t>());
+        err = attribute::set_val(attr, &value);
+        if (err == ESP_OK) {
+            ESP_LOGI(kTag, "Migrated startup brightness from 128 to restore previous level");
+        }
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, "level_cfg_v", 1);
+        if (err == ESP_OK) {
+            err = nvs_commit(handle);
+        }
+    }
+    nvs_close(handle);
+    return err;
 }
 
 void enable_deferred_persistence(uint32_t cluster_id, uint32_t attribute_id)
@@ -146,8 +259,8 @@ extern "C" void app_main()
     light_config.on_off.on_off = false;
     light_config.on_off_lighting.start_up_on_off = nullptr;
     light_config.level_control.current_level = 128;
-    light_config.level_control.on_level = 128;
-    light_config.level_control_lighting.start_up_current_level = 128;
+    light_config.level_control.on_level = nullptr;
+    light_config.level_control_lighting.start_up_current_level = nullptr;
     light_config.color_control.color_mode =
         static_cast<uint8_t>(ColorControl::ColorMode::kColorTemperature);
     light_config.color_control.enhanced_color_mode =
@@ -174,6 +287,8 @@ extern "C" void app_main()
 
     s_light_endpoint_id = endpoint::get_id(endpoint);
     ESP_LOGI(kTag, "LampSmart Matter light endpoint: %u", s_light_endpoint_id);
+    ESP_ERROR_CHECK(register_command_callbacks());
+    ESP_ERROR_CHECK(migrate_startup_level());
 
     enable_deferred_persistence(LevelControl::Id,
                                 LevelControl::Attributes::CurrentLevel::Id);
